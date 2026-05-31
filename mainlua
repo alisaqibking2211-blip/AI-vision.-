@@ -1,0 +1,177 @@
+require "import"
+import "cjson"
+import "android.widget.*"
+import "android.os.*"
+import "android.view.*"
+import "android.content.Context"
+import "android.graphics.Color"
+import "android.content.Intent"
+import "android.net.Uri"
+import "android.provider.MediaStore"
+import "java.io.File"
+import "android.text.InputType"
+import "android.widget.LinearLayout$LayoutParams"
+import "android.graphics.Typeface"
+import "java.net.URLEncoder"
+import "java.lang.System"
+import "com.androlua.Http"
+import "android.graphics.Bitmap"
+import "android.graphics.BitmapFactory"
+import "android.util.Base64"
+import "java.io.ByteArrayOutputStream"
+import "android.graphics.Rect"
+import "android.view.accessibility.AccessibilityNodeInfo"
+
+local ctx = service
+local File_CLASS = luajava.bindClass("java.io.File")
+
+local AI_PREFS = "CSR_AI_Assistant"
+local aiPrefs = ctx.getSharedPreferences(AI_PREFS, Context.MODE_PRIVATE)
+local aiEditor = aiPrefs.edit()
+
+local GEMINI_MODELS = {
+    "Gemini 2.5 Flash",
+    "Gemini 2.5 Pro",
+    "Gemini 2.0 Flash",
+    "Gemini 2.0 Pro",
+    "Gemini 1.5 Flash",
+    "Gemini 1.5 Pro",
+    "Gemini 1.0 Pro"
+}
+
+local geminiApiDetails = {
+    ["Gemini 2.5 Flash"] = { id = "models/gemini-2.5-flash", version = "v1beta" },
+    ["Gemini 2.5 Pro"] = { id = "models/gemini-2.5-pro", version = "v1beta" },
+    ["Gemini 2.0 Flash"] = { id = "models/gemini-2.0-flash", version = "v1beta" },
+    ["Gemini 2.0 Pro"] = { id = "models/gemini-2.0-pro", version = "v1beta" },
+    ["Gemini 1.5 Flash"] = { id = "models/gemini-1.5-flash", version = "v1beta" },
+    ["Gemini 1.5 Pro"] = { id = "models/gemini-1.5-pro", version = "v1beta" },
+    ["Gemini 1.0 Pro"] = { id = "models/gemini-1.0-pro", version = "v1beta" }
+}
+
+local POPULAR_LANGUAGES = {
+    "English", "Urdu (اردو)", "Hindi (हिन्दी)", "Arabic (العربية)", 
+    "Punjabi (پنجابی)", "Pashto (پشتو)", "Sindhi (سنڌي)", "Persian (فارسی)",
+    "Spanish (Español)", "French (Français)", "German (Deutsch)", 
+    "Chinese (中文)", "Russian (Русский)", "Japanese (日本語)", 
+    "Turkish (Türkçe)", "Bengali (বাংলা)", "Portuguese (Português)"
+}
+
+local RECOGNIZE_OPTIONS = {
+    "Analyze Image",
+    "Current Screen",
+    "Current Item",
+    "Extract Text Only"
+}
+
+local photoFilePaths = {}
+local selectedPhotoPath = ""
+local mainDlg = nil
+local processButton = nil
+local progressDlg = nil
+
+function notify(msg)
+  if service and service.speak then service.speak(msg) end
+  Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+end
+
+function vibrate()
+    local vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE)
+    if vibrator then vibrator.vibrate(35) end
+end
+
+function getGeminiApiKey() return aiPrefs.getString("gemini_apiKey", "") end
+function saveGeminiApiKey(key) aiEditor.putString("gemini_apiKey", key); aiEditor.commit() end
+function getSelectedLanguage() return aiPrefs.getString("selected_language", "English") end
+function saveSelectedLanguage(lang) aiEditor.putString("selected_language", lang); aiEditor.commit() end
+function getGeminiModel() return aiPrefs.getString("gemini_model", "Gemini 2.5 Flash") end
+function saveGeminiModel(model) aiEditor.putString("gemini_model", model); aiEditor.commit() end
+function getSelectedRecognizeOption() return aiPrefs.getString("rec_option", "Analyze Image") end
+function saveSelectedRecognizeOption(opt) aiEditor.putString("rec_option", opt); aiEditor.commit() end
+
+function getCurrentFocusedItem()
+    local focusedNode = nil
+    
+    if service.getFocusView then
+        local success, result = pcall(function() return service.getFocusView() end)
+        if success and result then focusedNode = result end
+    end
+    
+    if not focusedNode and service.getCurrentNode then
+        local success, result = pcall(function() return service.getCurrentNode() end)
+        if success and result then focusedNode = result end
+    end
+    
+    if not focusedNode and service.findFocus then
+        local success, result = pcall(function() return service.findFocus() end)
+        if success and result then focusedNode = result end
+    end
+    
+    if not focusedNode and service.getRootInActiveWindow then
+        local success, root = pcall(function() return service.getRootInActiveWindow() end)
+        if success and root then
+            focusedNode = findFocusedNodeInTree(root)
+        end
+    end
+    
+    return focusedNode
+end
+
+function findFocusedNodeInTree(node)
+    if not node then return nil end
+    
+    local isVisible = false
+    pcall(function() isVisible = node.isVisibleToUser() end)
+    if not isVisible then return nil end
+    
+    local isFocused = false
+    pcall(function() isFocused = node.isFocused() end)
+    if isFocused then return node end
+    
+    local childCount = 0
+    pcall(function() childCount = node.getChildCount() end)
+    
+    for i = 0, childCount - 1 do
+        local child = nil
+        pcall(function() child = node.getChild(i) end)
+        if child then
+            local result = findFocusedNodeInTree(child)
+            if result then return result end
+        end
+    end
+    return nil
+end
+
+function getItemDetails(node)
+    if not node then return nil end
+    
+    local details = {}
+    pcall(function()
+        local text = node.getText()
+        if text and tostring(text) ~= "null" and tostring(text) ~= "" then
+            details.text = tostring(text)
+        end
+    end)
+    pcall(function()
+        local desc = node.getContentDescription()
+        if desc and tostring(desc) ~= "null" and tostring(desc) ~= "" then
+            details.contentDescription = tostring(desc)
+        end
+    end)
+    pcall(function()
+        local className = node.getClassName()
+        if className then
+            local classStr = tostring(className)
+            details.className = classStr
+            local simpleName = classStr:match("%.(%w+)$") or classStr
+            details.simpleType = simpleName
+        end
+    end)
+    pcall(function()
+        local viewId = node.getViewIdResourceName()
+        if viewId and tostring(viewId) ~= "null" and tostring(viewId) ~= "" then
+            details.viewId = tostring(viewId)
+        end
+    end)
+    pcall(function() details.isClickable = node.isClickab... Read more 
+12:59 pm
