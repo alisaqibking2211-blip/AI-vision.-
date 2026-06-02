@@ -22,6 +22,12 @@ import "java.io.ByteArrayOutputStream"
 import "android.graphics.Rect"
 import "android.view.accessibility.AccessibilityNodeInfo"
 
+-- سروس چیک کریں
+if service == nil then
+    Toast.makeText(activity or context, "Error: Accessibility service not running", Toast.LENGTH_LONG).show()
+    return
+end
+
 local ctx = service
 local File_CLASS = luajava.bindClass("java.io.File")
 
@@ -70,9 +76,18 @@ local mainDlg = nil
 local processButton = nil
 local progressDlg = nil
 
+-- UI تھریڈ پر کام کرنے کے لیے ہینڈلر
+local mainHandler = Handler(Looper.getMainLooper())
+
+function runOnUiThread(func)
+    mainHandler.post(func)
+end
+
 function notify(msg)
-  if service and service.speak then service.speak(msg) end
-  Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+    runOnUiThread(function()
+        if service and service.speak then service.speak(msg) end
+        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+    end)
 end
 
 function vibrate()
@@ -231,8 +246,8 @@ function analyzeCurrentItem()
         return "Item information:\n\nType: " .. (details.simpleType or "Unknown") .. "\nClickable: " .. (details.isClickable and "Yes" or "No")
     end
     
-    local resultText = "📱 **Current Item Analysis**\n\n"
-    resultText = resultText .. "**What is this element?**\n"
+    local resultText = "📱 *Current Item Analysis*\n\n"
+    resultText = resultText .. "*What is this element?*\n"
     if details.simpleType then
         if details.simpleType:find("Button") then resultText = resultText .. "• Type: Button\n"
         elseif details.simpleType:find("Image") then resultText = resultText .. "• Type: Icon / Image Button\n"
@@ -303,7 +318,7 @@ function analyzeCurrentScreen()
         return "No text elements found on current screen."
     end
     
-    local summary = "📱 **Current Screen Summary**\n\nFound " .. #elements .. " visible text elements.\n\n"
+    local summary = "📱 *Current Screen Summary*\n\nFound " .. #elements .. " visible text elements.\n\n"
     for i = 1, math.min(20, #elements) do
         summary = summary .. "- " .. (elements[i].text ~= "" and elements[i].text or elements[i].desc) .. "\n"
     end
@@ -447,34 +462,41 @@ function scanAllImages()
     end
 end
 
--- یہ وہ فنکشن ہے جس میں Share بٹن کا اضافہ کیا گیا ہے
+-- بہتر کردہ ڈائیلاگ جس میں Share بٹن اور Clipboard بہتر طریقے سے کام کرتا ہے
 function showResultDialog(title, content)
-    local resultDlg = LuaDialog(ctx)
-    resultDlg.setTitle(title)
-    local scrollView = ScrollView(ctx)
-    local textView = TextView(ctx)
-    textView.setText(content)
-    textView.setTextSize(14)
-    textView.setPadding(30, 20, 30, 20)
-    textView.setTextColor(0xFF000000)
-    scrollView.addView(textView)
-    resultDlg.setView(scrollView)
-    resultDlg.setPositiveButton("Close", nil)
-    resultDlg.setNeutralButton("Copy", function()
-        local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-        clipboard.setText(content)
-        notify("Copied to clipboard")
-        vibrate()
+    runOnUiThread(function()
+        local resultDlg = LuaDialog(ctx)
+        resultDlg.setTitle(title)
+        local scrollView = ScrollView(ctx)
+        local textView = TextView(ctx)
+        textView.setText(content)
+        textView.setTextSize(14)
+        textView.setPadding(30, 20, 30, 20)
+        textView.setTextColor(0xFF000000)
+        scrollView.addView(textView)
+        resultDlg.setView(scrollView)
+        resultDlg.setPositiveButton("Close", nil)
+        resultDlg.setNeutralButton("Copy", function()
+            local clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+            if clipboard then
+                if clipboard.setPrimaryClip then
+                    clipboard.setPrimaryClip(ClipData.newPlainText("AI Result", content))
+                else
+                    clipboard.setText(content) -- deprecated but works in older AndroLua
+                end
+                notify("Copied to clipboard")
+                vibrate()
+            end
+        end)
+        resultDlg.setNegativeButton("Share", function()
+            local shareIntent = Intent(Intent.ACTION_SEND)
+            shareIntent.setType("text/plain")
+            shareIntent.putExtra(Intent.EXTRA_TEXT, content)
+            ctx.startActivity(Intent.createChooser(shareIntent, "Share via"))
+            vibrate()
+        end)
+        resultDlg.show()
     end)
-    -- Share بٹن
-    resultDlg.setNegativeButton("Share", function()
-        local shareIntent = Intent(Intent.ACTION_SEND)
-        shareIntent.setType("text/plain")
-        shareIntent.putExtra(Intent.EXTRA_TEXT, content)
-        ctx.startActivity(Intent.createChooser(shareIntent, "Share via"))
-        vibrate()
-    end)
-    resultDlg.show()
 end
 
 function showAISettingsDialog()
@@ -779,32 +801,36 @@ function addSpacer(layout, height)
 end
 
 function showProgress(message)
-    if progressDlg then
-        pcall(function() progressDlg.dismiss() end)
-        progressDlg = nil
-    end
-    progressDlg = LuaDialog(ctx)
-    progressDlg.setTitle("Processing")
-    local layout = LinearLayout(ctx)
-    layout.setOrientation(1)
-    layout.setPadding(40, 30, 40, 30)
-    local tv = TextView(ctx)
-    tv.setText(message)
-    tv.setGravity(Gravity.CENTER)
-    local pb = ProgressBar(ctx)
-    pb.setIndeterminate(true)
-    layout.addView(pb)
-    layout.addView(tv)
-    progressDlg.setView(layout)
-    progressDlg.setCancelable(false)
-    progressDlg.show()
+    runOnUiThread(function()
+        if progressDlg then
+            pcall(function() progressDlg.dismiss() end)
+            progressDlg = nil
+        end
+        progressDlg = LuaDialog(ctx)
+        progressDlg.setTitle("Processing")
+        local layout = LinearLayout(ctx)
+        layout.setOrientation(1)
+        layout.setPadding(40, 30, 40, 30)
+        local tv = TextView(ctx)
+        tv.setText(message)
+        tv.setGravity(Gravity.CENTER)
+        local pb = ProgressBar(ctx)
+        pb.setIndeterminate(true)
+        layout.addView(pb)
+        layout.addView(tv)
+        progressDlg.setView(layout)
+        progressDlg.setCancelable(false)
+        progressDlg.show()
+    end)
 end
 
 function hideProgress()
-    if progressDlg then
-        pcall(function() progressDlg.dismiss() end)
-        progressDlg = nil
-    end
+    runOnUiThread(function()
+        if progressDlg then
+            pcall(function() progressDlg.dismiss() end)
+            progressDlg = nil
+        end
+    end)
 end
 
 function createMainUI()
@@ -968,4 +994,9 @@ function createMainUI()
     mainDlg.show()
 end
 
-createMainUI()
+-- ڈائیلاگ ظاہر کرنے سے پہلے سروس چیک کریں
+if service ~= nil then
+    createMainUI()
+else
+    Toast.makeText(activity or context, "Accessibility service is not active. Please enable it in settings.", Toast.LENGTH_LONG).show()
+end 
